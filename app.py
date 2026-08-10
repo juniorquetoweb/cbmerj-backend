@@ -1,6 +1,7 @@
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-import sqlite3
+import psycopg2
+import psycopg2.extras
 import os
 import json
 from datetime import datetime
@@ -8,50 +9,55 @@ from datetime import datetime
 app = Flask(__name__)
 CORS(app)
 
-DB_NAME = "cbmerj_online.db"
+DATABASE_URL = os.environ.get("DATABASE_URL")
+
+
+def get_conn():
+    return psycopg2.connect(DATABASE_URL)
+
 
 def init_db():
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_conn()
     cursor = conn.cursor()
-    
+
     # Tabela de Militares Cadastrados
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS militares (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             nome TEXT NOT NULL,
             data_nascimento TEXT NOT NULL,
             rg TEXT UNIQUE NOT NULL,
             cpf TEXT UNIQUE NOT NULL
         )
     ''')
-    
+
     # Tabela de Respostas dos Militares
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS respostas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             rg_militar TEXT NOT NULL,
             data_hora TEXT NOT NULL,
             respostas_json TEXT NOT NULL
         )
     ''')
-    
+
     # Tabela de Perguntas da Prova
     cursor.execute('''
         CREATE TABLE IF NOT EXISTS perguntas (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
+            id SERIAL PRIMARY KEY,
             tipo TEXT NOT NULL,
             enunciado TEXT NOT NULL,
             tempo INTEGER NOT NULL,
             opcoes_json TEXT
         )
     ''')
-    
-    # Se a tabela de perguntas estiver vazia ou desatualizada, carrega as 19 questões
+
+    # Se a tabela de perguntas estiver vazia, carrega as 19 questões padrão
     cursor.execute('SELECT COUNT(*) FROM perguntas')
     count = cursor.fetchone()[0]
-    
+
     if count < 19:
-        cursor.execute('DELETE FROM perguntas') # Reseta para garantir a lista completa de 1 a 19
+        cursor.execute('DELETE FROM perguntas')  # Reseta para garantir a lista completa de 1 a 19
         perguntas_19 = [
             ("mc", "1. Qual é o principal objetivo do atendimento realizado pela Central 193?", 120, json.dumps(["Registrar reclamações administrativas.", "Prestar informações turísticas.", "Receber, qualificar e despachar ocorrências de emergência.", "Elaborar relatórios estatísticos."])),
             ("mc", "2. Ao atender uma ligação, a primeira informação que deve ser confirmada é:", 120, json.dumps(["Nome do comandante da área.", "Endereço exato da ocorrência.", "Quantidade de viaturas disponíveis.", "Número de matrícula do atendente."])),
@@ -73,16 +79,23 @@ def init_db():
             ("mc", "18. O registro preciso do horário de cada etapa da ocorrência é importante para:", 120, json.dumps(["Apenas controle de ponto dos militares.", "Auditoria, estatística operacional e histórico jurídico da ocorrência.", "Preencher espaço no sistema.", "Escolher quem vai para a próxima ocorrência."])),
             ("mc", "19. Se o sistema informatizado sair do ar durante o plantão, a conduta correta é:", 120, json.dumps(["Parar o atendimento até o sistema voltar.", "Acionar o plano de contingência (registro manual/fichas físicas) e manter o atendimento.", "Mandar o público ligar para a Polícia Militar.", "Encerrar o plantão antecipadamente."]))
         ]
-        cursor.executemany('INSERT INTO perguntas (tipo, enunciado, tempo, opcoes_json) VALUES (?, ?, ?, ?)', perguntas_19)
+        cursor.executemany(
+            'INSERT INTO perguntas (tipo, enunciado, tempo, opcoes_json) VALUES (%s, %s, %s, %s)',
+            perguntas_19
+        )
 
     conn.commit()
+    cursor.close()
     conn.close()
+
 
 init_db()
 
+
 @app.route('/')
 def home():
-    return "Servidor CBMERJ 193 Online com 19 Questões!", 200
+    return "Servidor CBMERJ 193 Online com 19 Questões (Postgres/Supabase)!", 200
+
 
 # ROTA DE LOGIN DO MILITAR
 @app.route('/api/login', methods=['POST'])
@@ -93,27 +106,30 @@ def login():
     if not rg:
         return jsonify({'status': 'erro', 'mensagem': 'Informe o RG Militar!'}), 400
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute('SELECT nome, rg, cpf FROM militares WHERE rg = ?', (rg,))
+    cursor.execute('SELECT nome, rg, cpf FROM militares WHERE rg = %s', (rg,))
     militar = cursor.fetchone()
+    cursor.close()
     conn.close()
 
     if militar:
         return jsonify({
-            'status': 'sucesso', 
+            'status': 'sucesso',
             'militar': {'nome': militar[0], 'rg': militar[1], 'cpf': militar[2]}
         })
     else:
         return jsonify({'status': 'erro', 'mensagem': 'Acesso negado! RG Militar não cadastrado.'}), 401
 
+
 # ROTA PARA BUSCAR AS PERGUNTAS DA PROVA
 @app.route('/api/perguntas', methods=['GET'])
 def obter_perguntas():
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute('SELECT id, tipo, enunciado, tempo, opcoes_json FROM perguntas ORDER BY id ASC')
     rows = cursor.fetchall()
+    cursor.close()
     conn.close()
 
     lista = []
@@ -128,6 +144,7 @@ def obter_perguntas():
 
     return jsonify(lista)
 
+
 # ROTA PARA SALVAR RESPOSTAS DO QUIZ
 @app.route('/api/salvar', methods=['POST'])
 def salvar_resposta():
@@ -136,27 +153,33 @@ def salvar_resposta():
     respostas = json.dumps(data.get('respostas'))
     data_hora = datetime.now().strftime('%d/%m/%Y %H:%M:%S')
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute('INSERT INTO respostas (rg_militar, data_hora, respostas_json) VALUES (?, ?, ?)',
-                   (rg_militar, data_hora, respostas))
+    cursor.execute(
+        'INSERT INTO respostas (rg_militar, data_hora, respostas_json) VALUES (%s, %s, %s)',
+        (rg_militar, data_hora, respostas)
+    )
     conn.commit()
+    cursor.close()
     conn.close()
 
     return jsonify({'status': 'sucesso', 'mensagem': 'Avaliação enviada com sucesso!'})
+
 
 # ROTAS ADMINISTRATIVAS DO GESTOR
 
 @app.route('/api/admin/militares', methods=['GET'])
 def listar_militares():
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute('SELECT id, nome, data_nascimento, rg, cpf FROM militares ORDER BY nome ASC')
     militares = cursor.fetchall()
+    cursor.close()
     conn.close()
 
     lista = [{'id': m[0], 'nome': m[1], 'nascimento': m[2], 'rg': m[3], 'cpf': m[4]} for m in militares]
     return jsonify(lista)
+
 
 @app.route('/api/admin/salvar-militar', methods=['POST'])
 def salvar_militar():
@@ -170,34 +193,44 @@ def salvar_militar():
     if not nome or not nascimento or not rg or not cpf:
         return jsonify({'status': 'erro', 'mensagem': 'Todos os campos são obrigatórios!'}), 400
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_conn()
     cursor = conn.cursor()
 
     try:
         if m_id:
-            cursor.execute('UPDATE militares SET nome=?, data_nascimento=?, rg=?, cpf=? WHERE id=?',
-                           (nome, nascimento, rg, cpf, m_id))
+            cursor.execute(
+                'UPDATE militares SET nome=%s, data_nascimento=%s, rg=%s, cpf=%s WHERE id=%s',
+                (nome, nascimento, rg, cpf, m_id)
+            )
             mensagem = "Militar atualizado com sucesso!"
         else:
-            cursor.execute('INSERT INTO militares (nome, data_nascimento, rg, cpf) VALUES (?, ?, ?, ?)',
-                           (nome, nascimento, rg, cpf))
+            cursor.execute(
+                'INSERT INTO militares (nome, data_nascimento, rg, cpf) VALUES (%s, %s, %s, %s)',
+                (nome, nascimento, rg, cpf)
+            )
             mensagem = "Militar cadastrado com sucesso!"
 
         conn.commit()
+        cursor.close()
         conn.close()
         return jsonify({'status': 'sucesso', 'mensagem': mensagem})
-    except sqlite3.IntegrityError:
+    except psycopg2.errors.UniqueViolation:
+        conn.rollback()
+        cursor.close()
         conn.close()
         return jsonify({'status': 'erro', 'mensagem': 'RG Militar ou CPF já cadastrado!'}), 400
 
+
 @app.route('/api/admin/excluir-militar/<int:id_militar>', methods=['DELETE'])
 def excluir_militar(id_militar):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute('DELETE FROM militares WHERE id = ?', (id_militar,))
+    cursor.execute('DELETE FROM militares WHERE id = %s', (id_militar,))
     conn.commit()
+    cursor.close()
     conn.close()
     return jsonify({'status': 'sucesso', 'mensagem': 'Militar removido.'})
+
 
 @app.route('/api/admin/salvar-pergunta', methods=['POST'])
 def salvar_pergunta():
@@ -208,40 +241,49 @@ def salvar_pergunta():
     tempo = data.get('tempo')
     opcoes = json.dumps(data.get('opcoes', []))
 
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_conn()
     cursor = conn.cursor()
 
     if p_id:
-        cursor.execute('UPDATE perguntas SET tipo=?, enunciado=?, tempo=?, opcoes_json=? WHERE id=?',
-                       (tipo, enunciado, tempo, opcoes, p_id))
+        cursor.execute(
+            'UPDATE perguntas SET tipo=%s, enunciado=%s, tempo=%s, opcoes_json=%s WHERE id=%s',
+            (tipo, enunciado, tempo, opcoes, p_id)
+        )
     else:
-        cursor.execute('INSERT INTO perguntas (tipo, enunciado, tempo, opcoes_json) VALUES (?, ?, ?, ?)',
-                       (tipo, enunciado, tempo, opcoes))
+        cursor.execute(
+            'INSERT INTO perguntas (tipo, enunciado, tempo, opcoes_json) VALUES (%s, %s, %s, %s)',
+            (tipo, enunciado, tempo, opcoes)
+        )
 
     conn.commit()
+    cursor.close()
     conn.close()
     return jsonify({'status': 'sucesso', 'mensagem': 'Pergunta salva com sucesso!'})
 
+
 @app.route('/api/admin/excluir-pergunta/<int:id_pergunta>', methods=['DELETE'])
 def excluir_pergunta(id_pergunta):
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute('DELETE FROM perguntas WHERE id = ?', (id_pergunta,))
+    cursor.execute('DELETE FROM perguntas WHERE id = %s', (id_pergunta,))
     conn.commit()
+    cursor.close()
     conn.close()
     return jsonify({'status': 'sucesso', 'mensagem': 'Pergunta excluída.'})
 
+
 @app.route('/api/admin/respostas', methods=['GET'])
 def obter_respostas():
-    conn = sqlite3.connect(DB_NAME)
+    conn = get_conn()
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT r.id, m.nome, m.data_nascimento, m.rg, m.cpf, r.data_hora, r.respostas_json 
+        SELECT r.id, m.nome, m.data_nascimento, m.rg, m.cpf, r.data_hora, r.respostas_json
         FROM respostas r
         JOIN militares m ON r.rg_militar = m.rg
         ORDER BY r.id DESC
     ''')
     registros = cursor.fetchall()
+    cursor.close()
     conn.close()
 
     lista = []
@@ -257,6 +299,7 @@ def obter_respostas():
         })
 
     return jsonify(lista)
+
 
 if __name__ == '__main__':
     port = int(os.environ.get('PORT', 5000))
