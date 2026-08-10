@@ -27,9 +27,14 @@ def init_db():
             nome TEXT NOT NULL,
             data_nascimento TEXT NOT NULL,
             rg TEXT UNIQUE NOT NULL,
-            cpf TEXT UNIQUE NOT NULL
+            funcao TEXT
         )
     ''')
+
+    # Migração: remove a coluna cpf caso ainda exista de uma versão anterior do banco,
+    # e adiciona a coluna funcao caso o banco já exista de uma versão sem ela
+    cursor.execute('ALTER TABLE militares DROP COLUMN IF EXISTS cpf')
+    cursor.execute('ALTER TABLE militares ADD COLUMN IF NOT EXISTS funcao TEXT')
 
     # Tabela de Respostas dos Militares
     cursor.execute('''
@@ -108,7 +113,7 @@ def login():
 
     conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute('SELECT nome, rg, cpf FROM militares WHERE rg = %s', (rg,))
+    cursor.execute('SELECT nome, rg, funcao FROM militares WHERE rg = %s', (rg,))
     militar = cursor.fetchone()
     cursor.close()
     conn.close()
@@ -116,7 +121,7 @@ def login():
     if militar:
         return jsonify({
             'status': 'sucesso',
-            'militar': {'nome': militar[0], 'rg': militar[1], 'cpf': militar[2]}
+            'militar': {'nome': militar[0], 'rg': militar[1], 'funcao': militar[2]}
         })
     else:
         return jsonify({'status': 'erro', 'mensagem': 'Acesso negado! RG Militar não cadastrado.'}), 401
@@ -172,12 +177,12 @@ def salvar_resposta():
 def listar_militares():
     conn = get_conn()
     cursor = conn.cursor()
-    cursor.execute('SELECT id, nome, data_nascimento, rg, cpf FROM militares ORDER BY nome ASC')
+    cursor.execute('SELECT id, nome, data_nascimento, rg, funcao FROM militares ORDER BY nome ASC')
     militares = cursor.fetchall()
     cursor.close()
     conn.close()
 
-    lista = [{'id': m[0], 'nome': m[1], 'nascimento': m[2], 'rg': m[3], 'cpf': m[4]} for m in militares]
+    lista = [{'id': m[0], 'nome': m[1], 'nascimento': m[2], 'rg': m[3], 'funcao': m[4]} for m in militares]
     return jsonify(lista)
 
 
@@ -188,9 +193,9 @@ def salvar_militar():
     nome = data.get('nome')
     nascimento = data.get('data_nascimento')
     rg = data.get('rg')
-    cpf = data.get('cpf')
+    funcao = data.get('funcao')
 
-    if not nome or not nascimento or not rg or not cpf:
+    if not nome or not nascimento or not rg or not funcao:
         return jsonify({'status': 'erro', 'mensagem': 'Todos os campos são obrigatórios!'}), 400
 
     conn = get_conn()
@@ -199,14 +204,14 @@ def salvar_militar():
     try:
         if m_id:
             cursor.execute(
-                'UPDATE militares SET nome=%s, data_nascimento=%s, rg=%s, cpf=%s WHERE id=%s',
-                (nome, nascimento, rg, cpf, m_id)
+                'UPDATE militares SET nome=%s, data_nascimento=%s, rg=%s, funcao=%s WHERE id=%s',
+                (nome, nascimento, rg, funcao, m_id)
             )
             mensagem = "Militar atualizado com sucesso!"
         else:
             cursor.execute(
-                'INSERT INTO militares (nome, data_nascimento, rg, cpf) VALUES (%s, %s, %s, %s)',
-                (nome, nascimento, rg, cpf)
+                'INSERT INTO militares (nome, data_nascimento, rg, funcao) VALUES (%s, %s, %s, %s)',
+                (nome, nascimento, rg, funcao)
             )
             mensagem = "Militar cadastrado com sucesso!"
 
@@ -218,7 +223,7 @@ def salvar_militar():
         conn.rollback()
         cursor.close()
         conn.close()
-        return jsonify({'status': 'erro', 'mensagem': 'RG Militar ou CPF já cadastrado!'}), 400
+        return jsonify({'status': 'erro', 'mensagem': 'RG Militar já cadastrado!'}), 400
 
 
 @app.route('/api/admin/excluir-militar/<int:id_militar>', methods=['DELETE'])
@@ -277,7 +282,7 @@ def obter_respostas():
     conn = get_conn()
     cursor = conn.cursor()
     cursor.execute('''
-        SELECT r.id, m.nome, m.data_nascimento, m.rg, m.cpf, r.data_hora, r.respostas_json
+        SELECT r.id, m.nome, m.data_nascimento, m.rg, m.funcao, r.data_hora, r.respostas_json
         FROM respostas r
         JOIN militares m ON r.rg_militar = m.rg
         ORDER BY r.id DESC
@@ -293,7 +298,7 @@ def obter_respostas():
             'nome': r[1],
             'nascimento': r[2],
             'rg': r[3],
-            'cpf': r[4],
+            'funcao': r[4],
             'data_hora': r[5],
             'respostas': json.loads(r[6])
         })
